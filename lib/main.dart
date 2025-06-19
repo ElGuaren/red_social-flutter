@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:firebase_storage/firebase_storage.dart';
 import 'firebase_options.dart';
-import 'dart:io';
-import 'package:image_picker/image_picker.dart';
+import 'page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -66,8 +64,22 @@ class _LoginPageState extends State<LoginPage> {
         email: _email.text.trim(),
         password: _pass.text.trim(),
       );
+      await asegurarUsuarioEnFirestore();
     } catch (e) {
       _show("Error: $e");
+    }
+  }
+
+  Future<void> asegurarUsuarioEnFirestore() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+    if (!doc.exists) {
+      await FirebaseFirestore.instance.collection('users').doc(user.uid).set({
+        'username': user.email?.split('@')[0],
+        'email': user.email,
+      });
     }
   }
 
@@ -134,6 +146,13 @@ class _RegisterPageState extends State<RegisterPage> {
         email: _email.text.trim(),
         password: _pass.text.trim(),
       );
+
+      final uid = FirebaseAuth.instance.currentUser!.uid;
+      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+        'username': _email.text.trim().split('@')[0],
+        'email': _email.text.trim(),
+      });
+
       Navigator.pop(context);
     } catch (e) {
       _show("Error: $e");
@@ -163,7 +182,6 @@ class _RegisterPageState extends State<RegisterPage> {
     );
   }
 }
-
 // ---------------- HOME / FEED ----------------
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
@@ -342,21 +360,154 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
+
+
+
+
+
+
+
+
 // ---------------- PERFIL ----------------
-class ProfilePage extends StatelessWidget {
+
+class ProfilePage extends StatefulWidget {
   const ProfilePage({super.key});
 
   @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  final user = FirebaseAuth.instance.currentUser;
+
+  Future<void> seguirUsuario(String miUid, String otroUid) async {
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(miUid)
+        .collection('siguiendo')
+        .doc(otroUid)
+        .set({});
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(otroUid)
+        .collection('seguidores')
+        .doc(miUid)
+        .set({});
+  }
+
+  Future<void> dejarDeSeguirUsuario(String miUid, String otroUid) async {
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(miUid)
+        .collection('siguiendo')
+        .doc(otroUid)
+        .delete();
+    await FirebaseFirestore.instance
+        .collection('users')
+        .doc(otroUid)
+        .collection('seguidores')
+        .doc(miUid)
+        .delete();
+  }
+
+  Future<Set<String>> obtenerUsuariosSeguidos(String uid) async {
+    final snap = await FirebaseFirestore.instance
+        .collection('users')
+        .doc(uid)
+        .collection('siguiendo')
+        .get();
+
+    return snap.docs.map((doc) => doc.id).toSet();
+  }
+
+  Future<List<Map<String, dynamic>>> obtenerTodosMenosYo() async {
+    if (user == null) return [];
+    final miUid = user!.uid;
+
+    final usuariosSnap = await FirebaseFirestore.instance.collection('users').get();
+    final seguidos = await obtenerUsuariosSeguidos(miUid);
+
+    List<Map<String, dynamic>> resultado = [];
+
+    for (var doc in usuariosSnap.docs) {
+      final uid = doc.id;
+      final data = doc.data();
+      if (uid == miUid) continue;
+
+      resultado.add({
+        'uid': uid,
+        'username': data['username'] ?? uid,
+        'yaSeguido': seguidos.contains(uid),
+      });
+    }
+
+    return resultado;
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
     return Scaffold(
       appBar: AppBar(title: const Text("Perfil")),
       body: Padding(
         padding: const EdgeInsets.all(16),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text("Correo: ${user?.email ?? 'Desconocido'}"),
-          Text("UID: ${user?.uid ?? 'Desconocido'}"),
-        ]),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text("Correo: ${user?.email ?? 'Desconocido'}"),
+            Text("UID: ${user?.uid ?? 'Desconocido'}"),
+            const SizedBox(height: 20),
+            const Text("Usuarios sugeridos:", style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 10),
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(context, MaterialPageRoute(builder: (_) => const UsuariosDebugPage()));
+              },
+              icon: const Icon(Icons.group),
+              label: const Text("Ver grafo"),
+            ),
+            const SizedBox(height: 10),
+            FutureBuilder<List<Map<String, dynamic>>>(
+              future: obtenerTodosMenosYo(),
+              builder: (context, snapshot) {
+                if (snapshot.connectionState == ConnectionState.waiting) {
+                  return const CircularProgressIndicator();
+                }
+
+                final sugerencias = snapshot.data ?? [];
+                if (sugerencias.isEmpty) {
+                  return const Text("No hay usuarios disponibles.");
+                }
+
+                return Column(
+                  children: sugerencias.map((usuario) {
+                    return ListTile(
+                      title: Text(usuario['username']),
+                      subtitle: Text(usuario['uid']),
+                      trailing: usuario['yaSeguido']
+                          ? ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.redAccent,
+                              ),
+                              child: const Text("Dejar de seguir"),
+                              onPressed: () async {
+                                await dejarDeSeguirUsuario(user!.uid, usuario['uid']);
+                                setState(() {});
+                              },
+                            )
+                          : ElevatedButton(
+                              child: const Text("Seguir"),
+                              onPressed: () async {
+                                await seguirUsuario(user!.uid, usuario['uid']);
+                                setState(() {});
+                              },
+                            ),
+                    );
+                  }).toList(),
+                );
+              },
+            ),
+          ],
+        ),
       ),
     );
   }
